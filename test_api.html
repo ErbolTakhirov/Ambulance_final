@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Test - Ambulance Route</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            color: #667eea;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 2em;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin: 5px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .response {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚑 Ambulance Route API Tester</h1>
+
+        <!-- Test 1: Get Hospitals -->
+        <div class="section">
+            <h2>1. Получить список больниц</h2>
+            <button onclick="getHospitals()">GET /api/hospitals/</button>
+            <div id="hospitals-response" class="response" style="display:none;"></div>
+        </div>
+
+        <!-- Test 2: Calculate Route -->
+        <div class="section">
+            <h2>2. Рассчитать маршрут</h2>
+            <div class="input-group">
+                <label>Start Latitude:</label>
+                <input type="number" id="start_lat" value="42.875144" step="0.000001">
+            </div>
+            <div class="input-group">
+                <label>Start Longitude:</label>
+                <input type="number" id="start_lng" value="74.562028" step="0.000001">
+            </div>
+            <div class="input-group">
+                <label>End Latitude:</label>
+                <input type="number" id="end_lat" value="42.8755" step="0.000001">
+            </div>
+            <div class="input-group">
+                <label>End Longitude:</label>
+                <input type="number" id="end_lng" value="74.6030" step="0.000001">
+            </div>
+            <button onclick="calculateRoute()">POST /api/routes/calculate/</button>
+            <div id="route-response" class="response" style="display:none;"></div>
+        </div>
+
+        <!-- Test 3: Get Routes -->
+        <div class="section">
+            <h2>3. Получить список маршрутов</h2>
+            <button onclick="getRoutes()">GET /api/routes/</button>
+            <div id="routes-response" class="response" style="display:none;"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8000/api';
+
+        async function getHospitals() {
+            const responseDiv = document.getElementById('hospitals-response');
+            responseDiv.style.display = 'block';
+            responseDiv.innerHTML = 'Loading...';
+
+            try {
+                const response = await fetch(`${API_BASE}/hospitals/`);
+                const data = await response.json();
+                responseDiv.innerHTML = `Status: ${response.status}\n\n` + JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseDiv.innerHTML = `Error: ${error.message}`;
+            }
+        }
+
+        async function calculateRoute() {
+            const responseDiv = document.getElementById('route-response');
+            responseDiv.style.display = 'block';
+            responseDiv.innerHTML = 'Loading...';
+
+            const requestData = {
+                start_lat: parseFloat(document.getElementById('start_lat').value),
+                start_lng: parseFloat(document.getElementById('start_lng').value),
+                end_lat: parseFloat(document.getElementById('end_lat').value),
+                end_lng: parseFloat(document.getElementById('end_lng').value),
+                traffic_enabled: true,
+                alternatives: 3
+            };
+
+            try {
+                const response = await fetch(`${API_BASE}/routes/calculate/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                const data = await response.json();
+                responseDiv.innerHTML = `Status: ${response.status}\n\nRequest:\n${JSON.stringify(requestData, null, 2)}\n\nResponse:\n${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                responseDiv.innerHTML = `Error: ${error.message}`;
+            }
+        }
+
+        async function getRoutes() {
+            const responseDiv = document.getElementById('routes-response');
+            responseDiv.style.display = 'block';
+            responseDiv.innerHTML = 'Loading...';
+
+            try {
+                const response = await fetch(`${API_BASE}/routes/`);
+                const data = await response.json();
+                responseDiv.innerHTML = `Status: ${response.status}\n\n` + JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseDiv.innerHTML = `Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>
