@@ -15,8 +15,15 @@ class TrafficAwareRouter:
     """
     
     def __init__(self):
-        # Using main OSRM server as fallback
-        self.osrm_base_url = "http://router.project-osrm.org/route/v1/driving"
+        # List of OSRM servers to try (Main + Backup + More alternatives)
+        self.osrm_servers = [
+            "http://router.project-osrm.org/route/v1/driving",
+            "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+            "https://router.project-osrm.org/route/v1/driving",  # HTTPS version
+        ]
+        self.osrm_base_url = self.osrm_servers[0] # backward compatibility if needed
+        self.timeout = 10  # Reduced timeout for faster failover
+        self.max_retries = 1  # Only 1 retry per server for faster failover
     
     def calculate_optimal_route(
         self,
@@ -39,51 +46,161 @@ class TrafficAwareRouter:
         Returns:
             Dictionary with routes, each annotated with traffic-aware predictions
         """
-        # Get base routes from OSRM
-        base_routes = self._get_osrm_routes(
-            start_lat, start_lng, end_lat, end_lng, alternatives
-        )
-        
-        if not base_routes or 'routes' not in base_routes:
-            raise Exception("Failed to get routes from OSRM")
-        
-        # Enhance each route with traffic-aware predictions
-        enhanced_routes = []
-        for idx, route in enumerate(base_routes['routes']):
+        # Try to get base routes from OSRM
+        try:
+            base_routes = self._get_osrm_routes(
+                start_lat, start_lng, end_lat, end_lng, alternatives
+            )
+            
+            if not base_routes or 'routes' not in base_routes:
+                raise Exception("Failed to get routes from OSRM")
+            
+            # Enhance each route with traffic-aware predictions
+            enhanced_routes = []
+            for idx, route in enumerate(base_routes['routes']):
+                try:
+                    enhanced_route = self._enhance_route_with_traffic(
+                        route, traffic_data, idx == 0  # First route is primary
+                    )
+                    enhanced_routes.append(enhanced_route)
+                except Exception as e:
+                    print(f"Error enhancing route {idx}: {e}")
+                    # Fallback: add original route with OSRM values
+                    duration_mins = route['duration'] / 60
+                    dist_km = route['distance'] / 1000
+                    
+                    route['traffic_aware_duration'] = route['duration']
+                    route['traffic_aware_duration_minutes'] = duration_mins
+                    route['min_time_minutes'] = duration_mins
+                    route['max_time_minutes'] = duration_mins
+                    route['confidence'] = 100.0
+                    route['average_speed'] = (dist_km / (duration_mins/60)) if duration_mins > 0 else 50
+                    route['average_congestion'] = 0
+                    route['traffic_delay_minutes'] = 0
+                    route['quality'] = 'good'
+                    
+                    enhanced_routes.append(route)
+            
+            # Sort routes by predicted time (accounting for traffic)
+            enhanced_routes.sort(key=lambda r: r['traffic_aware_duration'])
+            
+            return {
+                'code': 'Ok',
+                'routes': enhanced_routes,
+                'waypoints': base_routes.get('waypoints', [])
+            }
+            
+        except Exception as e:
+            print(f"Routing failed, trying alternatives: {e}")
+            
+            # Try GraphHopper as alternative
             try:
-                enhanced_route = self._enhance_route_with_traffic(
-                    route, traffic_data, idx == 0  # First route is primary
-                )
-                enhanced_routes.append(enhanced_route)
-            except Exception as e:
-                print(f"Error enhancing route {idx}: {e}")
-                import traceback
-                traceback.print_exc()
-                # Fallback: add original route with OSRM values
-                duration_mins = route['duration'] / 60
-                dist_km = route['distance'] / 1000
+                from .graphhopper_router import get_graphhopper
+                gh_router = get_graphhopper()
+                gh_data = gh_router.get_route(start_lat, start_lng, end_lat, end_lng, alternatives)
                 
-                route['traffic_aware_duration'] = route['duration']
-                route['traffic_aware_duration_minutes'] = duration_mins
-                # Fill missing fields to prevent "0 min" on frontend
-                route['min_time_minutes'] = duration_mins
-                route['max_time_minutes'] = duration_mins
-                route['confidence'] = 100.0
-                route['average_speed'] = (dist_km / (duration_mins/60)) if duration_mins > 0 else 50
-                route['average_congestion'] = 0
-                route['traffic_delay_minutes'] = 0
-                route['quality'] = 'good'
+                if gh_data and gh_data.get('routes'):
+                    print("Using GraphHopper route")
+                    # Enhance routes with traffic data
+                    enhanced_routes = []
+                    for idx, route in enumerate(gh_data['routes']):
+                        try:
+                            enhanced_route = self._enhance_route_with_traffic(
+                                route, traffic_data, idx == 0
+                            )
+                            enhanced_routes.append(enhanced_route)
+                        except Exception as enhance_error:
+                            print(f"Error enhancing GraphHopper route: {enhance_error}")
+                            enhanced_routes.append(route)
+                    
+                    return {
+                        'code': 'Ok',
+                        'routes': enhanced_routes,
+                        'waypoints': gh_data.get('waypoints', [])
+                    }
+            except Exception as gh_error:
+                print(f"GraphHopper also failed: {gh_error}")
+            
+            # Final fallback: street-based route
+            return self._generate_fallback_route(start_lat, start_lng, end_lat, end_lng)
+
+    def _generate_fallback_route(self, start_lat, start_lng, end_lat, end_lng):
+        """Generate a route using A* on street network when OSRM is down"""
+        try:
+            # Load street network
+            from .osm_loader import OSMStreetLoader
+            from .street_graph_router import StreetGraphRouter
+            
+            streets = OSMStreetLoader.get_bishkek_streets()
+            
+            if streets and len(streets) > 0:
+                print(f"Building route using A* on {len(streets)} streets")
                 
-                enhanced_routes.append(route)
+                # Build graph and find route
+                router = StreetGraphRouter(streets)
+                route_coords = router.find_route(start_lat, start_lng, end_lat, end_lng)
+                
+                print(f"A* route found with {len(route_coords)} points")
+            else:
+                # Ultimate fallback: straight line
+                route_coords = [[start_lng, start_lat], [end_lng, end_lat]]
+                print("No streets available, using straight line")
+        except Exception as e:
+            print(f"A* routing failed: {e}, using straight line")
+            import traceback
+            traceback.print_exc()
+            route_coords = [[start_lng, start_lat], [end_lng, end_lat]]
         
-        # Sort routes by predicted time (accounting for traffic)
-        enhanced_routes.sort(key=lambda r: r['traffic_aware_duration'])
+        # Calculate distance along route
+        total_dist_km = 0
+        for i in range(len(route_coords) - 1):
+            lng1, lat1 = route_coords[i]
+            lng2, lat2 = route_coords[i + 1]
+            total_dist_km += self._haversine_distance(lat1, lng1, lat2, lng2)
+        
+        # Assume 30 km/h speed for city driving fallback
+        speed_kmh = 30
+        duration_hours = total_dist_km / speed_kmh
+        duration_seconds = duration_hours * 3600
+        duration_minutes = duration_hours * 60
+        
+        is_real_route = len(route_coords) > 2
         
         return {
-            'code': 'Ok',
-            'routes': enhanced_routes,
-            'waypoints': base_routes.get('waypoints', [])
+            'code': 'Fallback',
+            'routes': [{
+                'geometry': {
+                    'coordinates': route_coords,
+                    'type': 'LineString'
+                },
+                'distance': total_dist_km * 1000,
+                'duration': duration_seconds,
+                'traffic_aware_duration': duration_seconds,
+                'traffic_aware_duration_minutes': duration_minutes,
+                'min_time_minutes': duration_minutes * 0.9,
+                'max_time_minutes': duration_minutes * 1.5,
+                'confidence': 70.0 if is_real_route else 0.0,
+                'average_speed': speed_kmh,
+                'average_congestion': 0,
+                'quality': 'good' if is_real_route else 'unknown',
+                'is_recommended': True,
+                'warnings': ['OSRM unavailable' + (', using A* street routing' if is_real_route else ', showing direct line')]
+            }],
+            'waypoints': [
+                {'name': 'Start', 'location': [start_lng, start_lat]},
+                {'name': 'End', 'location': [end_lng, end_lat]}
+            ]
         }
+    
+    def _build_street_route(self, start_lat, start_lng, end_lat, end_lng, streets):
+        """DEPRECATED: Use StreetGraphRouter instead"""
+        # This method is no longer used, kept for compatibility
+        return [[start_lng, start_lat], [end_lng, end_lat]]
+    
+    def _find_nearest_street_point(self, lat, lng, streets):
+        """DEPRECATED: Use StreetGraphRouter instead"""
+        # This method is no longer used, kept for compatibility
+        return None
     
     def _get_osrm_routes(
         self,
@@ -93,9 +210,8 @@ class TrafficAwareRouter:
         end_lng: float,
         alternatives: int
     ) -> Dict:
-        """Get routes from OSRM API"""
+        """Get routes from OSRM API with failover and retry logic"""
         coords = f"{start_lng},{start_lat};{end_lng},{end_lat}"
-        url = f"{self.osrm_base_url}/{coords}"
         
         params = {
             'overview': 'full',
@@ -105,21 +221,42 @@ class TrafficAwareRouter:
             'annotations': 'true'
         }
         
+        headers = {
+            'User-Agent': 'AmbulanceRouteOptimizer/1.0 (Educational Project)'
+        }
         
-        try:
-            print(f"Requesting OSRM: {url}")
-            response = requests.get(url, params=params, timeout=10)
-            print(f"OSRM Status: {response.status_code}")
-            if response.status_code != 200:
-                print(f"OSRM Error: {response.text}")
-            
-            response.raise_for_status()
-            data = response.json()
-            print(f"OSRM Routes found: {len(data.get('routes', []))}")
-            return data
-        except Exception as e:
-            print(f"OSRM Exception: {e}")
-            raise Exception(f"OSRM API error: {str(e)}")
+        last_exception = None
+        
+        # Try each server with retries
+        for base_url in self.osrm_servers:
+            for attempt in range(self.max_retries):
+                url = f"{base_url}/{coords}"
+                try:
+                    print(f"Requesting OSRM (attempt {attempt + 1}/{self.max_retries}): {url}")
+                    response = requests.get(url, params=params, headers=headers, timeout=self.timeout)
+                    print(f"OSRM Status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        print(f"OSRM Routes found: {len(data.get('routes', []))}")
+                        return data
+                    else:
+                        print(f"OSRM Error on {base_url}: {response.text}")
+                        last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
+                except Exception as e:
+                    print(f"OSRM Connection Error on {base_url} (attempt {attempt + 1}): {e}")
+                    last_exception = e
+                    # Don't continue to next attempt if it's the last one
+                    if attempt < self.max_retries - 1:
+                        import time
+                        time.sleep(1)  # Wait 1 second before retry
+                    continue
+                
+                # If we got here and succeeded, break the retry loop
+                break
+        
+        # If we get here, all servers failed
+        raise Exception(f"All OSRM servers failed after {self.max_retries} retries. Last error: {str(last_exception)}")
     
     def _enhance_route_with_traffic(
         self,
